@@ -1,0 +1,22 @@
+services:
+  3x-ui:
+    image: {{ xui_image }}
+    container_name: 3x-ui
+    hostname: {{ domain_name }}
+    restart: unless-stopped
+    environment:
+      TZ: "{{ timezone }}"
+      XRAY_VMESS_AEAD_FORCED: "false"
+    ports:
+      # Панель управления доступна ТОЛЬКО локально для Nginx
+      - "127.0.0.1:{{ xui_panel_port }}:{{ xui_panel_port }}/tcp"
+      # Входящий порт Xray (VLESS/VMess WebSocket/gRPC) доступен ТОЛЬКО локально
+      - "127.0.0.1:{{ xui_xray_ws_port }}:{{ xui_xray_ws_port }}/tcp"
+    volumes:
+      - {{ xui_install_dir }}/db:/etc/x-ui
+      - {{ xui_install_dir }}/cert:/root/cert
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

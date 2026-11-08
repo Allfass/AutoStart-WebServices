@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG_TAG="safe-reboot"
+ALERT_EMAIL="{{ alert_email_to }}"
+
+log() {
+    logger -t "$LOG_TAG" "$1"
+}
+
+send_abort_mail() {
+    local reason="$1"
+    log "ERROR: $reason"
+    cat <<EOF | mail -s "[WARNING] Safe Reboot Aborted on $(hostname -f)" "$ALERT_EMAIL"
+Плановая перезагрузка сервера $(hostname -f) в 04:00 была отменена.
+Причина: $reason
+
+Требуется ручная проверка состояния сервисов перед перезагрузкой.
+Время: $(date -R)
+EOF
+}
+
+# 1. Проверка статуса и конфигурации Nginx
+if ! systemctl is-active --quiet nginx; then
+    send_abort_mail "Сервис Nginx не активен."
+    exit 1
+fi
+
+if ! nginx -t >/dev/null 2>&1; then
+    send_abort_mail "Ошибка в конфигурационных файлах Nginx (nginx -t failed)."
+    exit 1
+fi
+
+# 2. Проверка статуса Docker и контейнера 3x-ui
+if ! systemctl is-active --quiet docker; then
+    send_abort_mail "Сервис Docker не активен."
+    exit 1
+fi
+
+CONTAINER_RUNNING=$(docker inspect -f '{{ '{{' }}.State.Running{{ '}}' }}' 3x-ui 2>/dev/null || echo "false")
+if [[ "$CONTAINER_RUNNING" != "true" ]]; then
+    send_abort_mail "Контейнер 3x-ui не запущен."
+    exit 1
+fi
+
+# 3. Проверка отсутствия активных процессов apt/dpkg (например, unattended-upgrades)
+if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+    send_abort_mail "Обнаружена активная блокировка dpkg/apt (идет обновление пакетов)."
+    exit 1
+fi
+
+log "Pre-flight checks passed (Nginx OK, Docker & 3x-ui OK). Initiating graceful reboot."
+/usr/sbin/shutdown -r +1 "Scheduled daily maintenance reboot"

@@ -1,0 +1,13 @@
+agentAddress udp:{{ snmp_bind_address }}:161
+sysLocation {{ snmp_location }}
+sysContact {{ snmp_contact }}
+sysServices 72
+
+# Доступ только на чтение (RO) для системных метрик (CPU, RAM, Disk, Network)
+view systemonly included .1.3.6.1.2.1
+view systemonly included .1.3.6.1.4.1.2021
+
+rocommunity {{ snmp_ro_community }} default -V systemonly
+
+# Отключение логов на каждый опрос для снижения нагрузки на journald
+dontLogTCPWrappersConnects yes

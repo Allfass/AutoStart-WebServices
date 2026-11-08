@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+DOMAIN="{{ domain_name }}"
+CERT_FILE="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+PANEL_PORT="{{ xui_panel_port }}"
+SECRET_PATH="{{ xui_web_base_path }}"
+WARN_DAYS="{{ ssl_expiry_warn_days }}"
+ALERT_EMAIL="{{ alert_email_to }}"
+STATE_FILE="/run/vpn-healthcheck.failed"
+
+ERRORS=()
+
+# 1. Проверка systemd-сервиса Nginx и HTTP-ответа сайта-заглушки
+if ! systemctl is-active --quiet nginx; then
+    ERRORS+=("[-] Сервис Nginx остановлен (systemctl is-active nginx != active).")
+else
+    HTTP_CODE=$(curl -ks -o /dev/null -w "%{http_code}" --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/" || echo "000")
+    if [[ "$HTTP_CODE" != "200" ]]; then
+        ERRORS+=("[-] Nginx не отдает сайт-заглушку по HTTPS (HTTP код: ${HTTP_CODE}).")
+    fi
+fi
+
+# 2. Проверка валидности и срока действия SSL-сертификата
+if [[ ! -f "$CERT_FILE" ]]; then
+    ERRORS+=("[-] Файл SSL-сертификата не найден: ${CERT_FILE}.")
+else
+    WARN_SECONDS=$(( WARN_DAYS * 86400 ))
+    if ! openssl x509 -checkend "$WARN_SECONDS" -noout -in "$CERT_FILE" >/dev/null 2>&1; then
+        EXPIRY_DATE=$(openssl x509 -enddate -noout -in "$CERT_FILE" | cut -d= -f2)
+        ERRORS+=("[-] SSL-сертификат для ${DOMAIN} истекает менее чем через ${WARN_DAYS} дн. (Дата истечения: ${EXPIRY_DATE}).")
+    fi
+fi
+
+# 3. Проверка Docker-контейнера 3x-ui и локального порта панели
+if ! systemctl is-active --quiet docker; then
+    ERRORS+=("[-] Демон Docker остановлен.")
+else
+    C_STATE=$(docker inspect -f '{{ '{{' }}.State.Running{{ '}}' }}' 3x-ui 2>/dev/null || echo "missing")
+    if [[ "$C_STATE" != "true" ]]; then
+        ERRORS+=("[-] Контейнер 3x-ui не запущен (статус: ${C_STATE}).")
+    else
+        PANEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PANEL_PORT}/${SECRET_PATH}/" || echo "000")
+        if [[ "$PANEL_CODE" != "200" && "$PANEL_CODE" != "302" && "$PANEL_CODE" != "307" ]]; then
+            ERRORS+=("[-] Локальный порт 3x-ui (127.0.0.1:${PANEL_PORT}) не отвечает корректно (HTTP код: ${PANEL_CODE}).")
+        fi
+    fi
+fi
+
+# Обработка результатов и отправка Email
+if (( ${#ERRORS[@]} > 0 )); then
+    if [[ ! -f "$STATE_FILE" ]]; then
+        touch "$STATE_FILE"
+        REPORT=$(printf "%s\n" "${ERRORS[@]}")
+        cat <<EOF | mail -s "[CRITICAL] Сбой инфраструктуры 3x-ui/Nginx на $(hostname -f)" "$ALERT_EMAIL"
+Обнаружены проблемы в работе VPN-узла $(hostname -f) (${DOMAIN}).
+Требуется ручной анализ и вмешательство администратора.
+
+Детали проверки:
+${REPORT}
+
+Сводка состояния сервисов:
+--- Nginx Status ---
+$(systemctl status nginx --no-pager -n 5 2>&1)
+
+--- Docker 3x-ui Status ---
+$(docker ps -a --filter name=3x-ui 2>&1)
+
+Время инцидента: $(date -R)
+EOF
+    fi
+    exit 1
+else
+    # Если сервисы восстановились — удаляем маркер сбоя
+    [[ -f "$STATE_FILE" ]] && rm -f "$STATE_FILE"
+    exit 0
+fi
